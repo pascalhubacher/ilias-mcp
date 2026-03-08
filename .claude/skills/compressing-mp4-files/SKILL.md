@@ -27,16 +27,24 @@ python -c "
 import os, sys
 root = sys.argv[1]
 for dirpath, _, filenames in os.walk(root):
+    names = set(f.lower() for f in filenames)
     for f in filenames:
         if f.lower().endswith('.mp4') and not f.lower().endswith('-compressed.mp4'):
+            stem = f[:-4]  # strip .mp4
+            compressed_name = (stem + '-compressed.mp4').lower()
+            if compressed_name in names:
+                print('ALREADY_COMPRESSED', os.path.join(dirpath, f))
+                continue
             p = os.path.join(dirpath, f)
             print(os.path.getsize(p), p)
 " "<TARGET_DIR>"
 ```
 
-Each output line is `<size_in_bytes> <absolute_path>`. Parse it to build the work list.
+Each output line is either:
+- `ALREADY_COMPRESSED <absolute_path>` — a `-compressed.mp4` counterpart already exists → skip with status "skipped (already compressed)"
+- `<size_in_bytes> <absolute_path>` — parse to build the work list
 
-For each file:
+For each file in the work list:
 - Convert size to MiB: `size_mib = size_bytes / (1024 * 1024)`
 - If size_mib ≤ 200: skip with status "skipped (≤ 200 MiB)"
 - Otherwise: add to the compression queue
@@ -111,6 +119,7 @@ Print a summary table:
 |------|----------|------------|-------|--------|
 | lecture01.mp4 | 450 MiB | 198 MiB | 44% | ✓ done |
 | intro.mp4 | 95 MiB | — | — | skipped (≤200 MiB) |
+| lecture02.mp4 | 380 MiB | — | — | skipped (already compressed) |
 ```
 
 Total: X compressed, Y skipped, Z errors.
