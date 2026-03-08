@@ -171,3 +171,43 @@ After login, the adapter navigates to the **"Aktuelles Semester"** entry in the 
 Course items are rendered as `<button data-action="...&ref_id=...">` elements inside `.il-item-title`
 (not as plain `<a>` links), so the adapter reads the `data-action` attribute to extract each
 course's `ref_id`, title and URL.
+
+## Available Claude Code skills
+
+These skills are invocable as slash commands inside Claude Code (e.g. type `/compressing-mp4-files` in the chat).
+
+### `/compressing-mp4-files`
+
+Compresses ILIAS course mp4 downloads to ≤ 200 MiB so they can be uploaded to [NotebookLM](https://notebooklm.google.com/).
+
+```text
+/compressing-mp4-files                   # compress all mp4 files under DOWNLOAD_DIR
+/compressing-mp4-files <course-name>     # compress only one course subfolder
+/compressing-mp4-files <absolute-path>   # compress a specific directory
+```
+
+**Requires:** `DOWNLOAD_DIR` set in `.env`; `ffmpeg` and `ffprobe` on `PATH`.
+
+Install ffmpeg: `winget install Gyan.FFmpeg` (Windows) · `brew install ffmpeg` (macOS) · `sudo apt install ffmpeg` (Debian/Ubuntu)
+
+The skill reads `DOWNLOAD_DIR`, skips files already ≤ 200 MiB, and for each oversized file runs ffmpeg two-pass encoding at a calculated bitrate. Output is saved as `<original-stem>-compressed.mp4` alongside the original. Finishes with a summary table showing original size, compressed size, ratio, and status per file.
+
+### `/updating-docs`
+
+Updates `README.md` and `CLAUDE.md` to reflect the current state of the codebase. No arguments needed.
+
+```text
+/updating-docs
+```
+
+Run this after adding or changing tools, env vars, domain models, adapters, or any project file. The skill reads all source files, compares them against existing docs, rewrites both `README.md` (user-facing) and `CLAUDE.md` (complete verbatim source for AI reconstruction), and prints a summary of every change made.
+
+### `/checking-mcp-compliance`
+
+Performs a live MCP Python SDK compliance audit against current best practices. No arguments needed.
+
+```text
+/checking-mcp-compliance
+```
+
+Fetches up-to-date MCP best-practice rules, checks each rule against the codebase, and reports any violations or improvements needed.

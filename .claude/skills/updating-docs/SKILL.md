@@ -42,6 +42,17 @@ Keep it user-facing and concise. Required sections:
 - **Available MCP tools** — table derived from `@mcp.tool()` docstrings
 - **Configuration (.env)** — table of all env vars with required/optional flag
 - **Tests** — test command and coverage table (one row per test file)
+- **Available Claude Code skills** — one subsection per skill in `.claude/skills/`. Each subsection must clearly state:
+  - What the skill does
+  - How to invoke it (exact slash command, e.g. `/compressing-mp4-files`)
+  - Any required arguments or preconditions (e.g. `.env` must be configured, `ffmpeg` must be installed)
+  - What output or side effects to expect
+
+  The `compressing-mp4-files` skill must be documented here. Its entry must cover:
+  - Purpose: compresses ILIAS course mp4 downloads to ≤ 200 MiB for NotebookLM upload
+  - Invocation: `/compressing-mp4-files` (no args = all courses; optional course name/path = single course)
+  - Preconditions: `DOWNLOAD_DIR` set in `.env`, `ffmpeg`/`ffprobe` installed
+  - Output: compressed files saved as `<original-stem>-compressed.mp4` alongside the originals; summary table printed
 
 Do not remove sections unless the feature no longer exists.
 
