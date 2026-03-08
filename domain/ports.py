@@ -6,7 +6,7 @@ Concrete implementations live in infrastructure/.
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .models import ContentItem, Course, CourseFile, LoginCredentials, RefId, VideoItem
+from .models import ContentItem, Course, CourseFile, LoginCredentials, RefId, Semester, VideoItem
 
 
 class IAuthPort(ABC):
@@ -24,8 +24,12 @@ class ICoursePort(ABC):
     """Port for reading courses from ILIAS."""
 
     @abstractmethod
-    async def get_courses(self) -> list[Course]:
-        """Return all courses visible on the ILIAS dashboard."""
+    async def get_semesters(self) -> list[Semester]:
+        """Return all available semesters from the ILIAS dashboard."""
+
+    @abstractmethod
+    async def get_courses(self, semester_label: str | None = None) -> list[Course]:
+        """Return all courses for the given semester label (or current semester if None)."""
 
     @abstractmethod
     async def list_content(self, ref_id: RefId) -> list[ContentItem]:

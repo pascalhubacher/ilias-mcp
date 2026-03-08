@@ -113,15 +113,17 @@ class DownloadService:
         tracker: DownloadTracker | None = None,
         log: ProgressCB = None,
         sections: list[ExpandedContentItem] | None = None,
+        semester_label: str | None = None,
     ) -> tuple[int, int]:
         """
         Download all files of a single course into output_dir/<course_title>/.
         Returns (downloaded, skipped) counts.
         If *sections* is provided (pre-fetched via list_course_content), the
         content scan is skipped; otherwise list_course_content is called here.
+        *semester_label* is forwarded to list_courses to fetch from the correct semester.
         """
         self._auth.require_authenticated()
-        courses = await self._course_service.list_courses()
+        courses = await self._course_service.list_courses(semester_label)
         course = next((c for c in courses if c.ref_id == ref_id.value), None)
         if course is None:
             raise ValueError(f"Course with ref_id={ref_id.value} not found.")
@@ -300,10 +302,13 @@ class DownloadService:
         output_dir: Path,
         tracker: DownloadTracker | None = None,
         log: ProgressCB = None,
+        semester_label: str | None = None,
     ) -> str:
         """
         Download every file from every course into output_dir/<course_title>/.
         Skips files that already exist. Returns a human-readable summary report.
+        *semester_label* restricts the download to a specific semester; if None,
+        the current semester is used.
 
         Two-phase approach:
         1. Scan all courses via list_course_content to discover their content.
@@ -313,7 +318,7 @@ class DownloadService:
         if tracker is not None:
             tracker.reset()
 
-        courses = await self._course_service.list_courses()
+        courses = await self._course_service.list_courses(semester_label)
 
         # Phase 1: discover content of every course
         if log:
@@ -345,6 +350,7 @@ class DownloadService:
                 tracker,
                 log=log,
                 sections=course_sections[course.ref_id],
+                semester_label=semester_label,
             )
             total_downloaded += downloaded
             total_skipped += skipped

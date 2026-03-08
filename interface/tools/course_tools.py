@@ -16,12 +16,41 @@ logger = logging.getLogger(__name__)
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
-    async def list_courses(ctx: Context[ServerSession, AppContext]) -> list[dict]:
-        """List all courses available on the ILIAS dashboard. Login first."""
+    async def list_semesters(ctx: Context[ServerSession, AppContext]) -> list[dict]:
+        """
+        List all available semesters on the ILIAS dashboard. Login first.
+        Returns each semester's label (e.g. "HS2025") and whether it is the current one.
+        Use the label with list_courses, download_course_files, and download_all_files
+        to target a specific semester.
+        """
+        app = app_from_ctx(ctx)
+        app.rate_limiter.check("list_semesters")
+        logger.info("Tool 'list_semesters' called.")
+        semesters = await app.course_service.list_semesters()
+        return [
+            {"label": s.label, "url": s.url, "is_current": s.is_current}
+            for s in semesters
+        ]
+
+    @mcp.tool()
+    async def list_courses(
+        ctx: Context[ServerSession, AppContext],
+        semester_label: str = "",
+        semester_ref_id: str = "",
+    ) -> list[dict]:
+        """
+        List all courses for a semester. Login first.
+
+        Args:
+            semester_label: Semester label, e.g. "HS2025" (from list_semesters).
+                            Leave empty to use the current semester.
+                            Note: semester_ref_id is accepted as an alias for this parameter.
+        """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("list_courses")
-        logger.info("Tool 'list_courses' called.")
-        courses = await app.course_service.list_courses()
+        sem = semester_label or semester_ref_id or None
+        logger.info("Tool 'list_courses' called (semester=%s).", sem or "current")
+        courses = await app.course_service.list_courses(sem)
         return [{"title": clean_text(c.title), "ref_id": c.ref_id, "url": c.url} for c in courses]
 
     @mcp.tool()

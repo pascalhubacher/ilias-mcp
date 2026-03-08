@@ -60,6 +60,14 @@ class ExpandedContentItem:
 
 
 @dataclass(frozen=True)
+class Semester:
+    """Represents a semester grouping on the ILIAS dashboard."""
+    label: str       # e.g. "HS2025", "FS2026" — the unique identifier
+    url: str         # Stable goto.php URL to this semester's course listing page
+    is_current: bool = False  # True if this is the currently active/selected semester
+
+
+@dataclass(frozen=True)
 class RefId:
     """
     Value object for an ILIAS repository reference ID.

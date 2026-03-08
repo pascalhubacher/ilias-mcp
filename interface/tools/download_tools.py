@@ -29,35 +29,67 @@ def _progress_log(ctx: Context[ServerSession, AppContext], collector: list[str])
 
 def register(mcp: FastMCP, download_dir: str) -> None:
     @mcp.tool()
-    async def download_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> str:
+    async def download_course_files(
+        ctx: Context[ServerSession, AppContext],
+        ref_id: str,
+        semester_label: str = "",
+        semester_ref_id: str = "",
+    ) -> str:
         """
         Download all files from a single course to DOWNLOAD_DIR (.env).
-        Always call preview_course_files first and show the result to the user before calling this tool.
+        When a semester is specified, files are saved under DOWNLOAD_DIR/<semester_label>/<course>/.
+        Always call list_course_content first and show the result to the user before calling this tool.
 
         Args:
             ref_id: The ILIAS ref_id of the course (obtained from list_courses).
+            semester_label: Semester label, e.g. "HS2025" (from list_semesters).
+                            Used both for navigation and as the subfolder name. Leave empty for current semester.
+                            Note: semester_ref_id is accepted as an alias for this parameter.
         """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("download_course_files")
-        logger.info("Tool 'download_course_files' called with ref_id=%s.", ref_id)
+        semester_label = semester_label or semester_ref_id
+        logger.info("Tool 'download_course_files' called with ref_id=%s, semester=%s.", ref_id, semester_label or "current")
         app.download_tracker.reset()
+        base_dir = Path(download_dir) / semester_label if semester_label else Path(download_dir)
         log_lines: list[str] = []
         downloaded, skipped = await app.download_service.download_course(
-            RefId(ref_id), Path(download_dir), app.download_tracker, log=_progress_log(ctx, log_lines)
+            RefId(ref_id),
+            base_dir,
+            app.download_tracker,
+            log=_progress_log(ctx, log_lines),
+            semester_label=semester_label or None,
         )
-        summary = _build_summary(downloaded, skipped, 1, Path(download_dir), app.download_tracker)
+        summary = _build_summary(downloaded, skipped, 1, base_dir, app.download_tracker)
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
 
     @mcp.tool()
-    async def download_all_files(ctx: Context[ServerSession, AppContext]) -> str:
-        """Download every file from every course to the directory configured in DOWNLOAD_DIR (.env)."""
+    async def download_all_files(
+        ctx: Context[ServerSession, AppContext],
+        semester_label: str = "",
+        semester_ref_id: str = "",
+    ) -> str:
+        """
+        Download every file from every course to the directory configured in DOWNLOAD_DIR (.env).
+        When a semester is specified, files are saved under DOWNLOAD_DIR/<semester_label>/<course>/.
+
+        Args:
+            semester_label: Semester label, e.g. "HS2025" (from list_semesters).
+                            Used both for navigation and as the subfolder name. Leave empty for current semester.
+                            Note: semester_ref_id is accepted as an alias for this parameter.
+        """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("download_all_files")
-        logger.info("Tool 'download_all_files' called.")
+        semester_label = semester_label or semester_ref_id
+        logger.info("Tool 'download_all_files' called (semester=%s).", semester_label or "current")
+        base_dir = Path(download_dir) / semester_label if semester_label else Path(download_dir)
         log_lines: list[str] = []
         summary = await app.download_service.download_all(
-            Path(download_dir), app.download_tracker, log=_progress_log(ctx, log_lines)
+            base_dir,
+            app.download_tracker,
+            log=_progress_log(ctx, log_lines),
+            semester_label=semester_label or None,
         )
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
