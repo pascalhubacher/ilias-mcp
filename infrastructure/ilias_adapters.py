@@ -16,7 +16,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from domain.models import ContentItem, Course, CourseFile, LoginCredentials, RefId, VideoItem
+from domain.models import ContentItem, Course, CourseFile, LoginCredentials, RefId, Semester, VideoItem
 from domain.ports import IAuthPort, ICoursePort, IFilePort
 from domain.utils import sanitize_filename
 from infrastructure.browser import BrowserManager
@@ -192,31 +192,77 @@ class IliasCourseAdapter(ICoursePort):
             raise ValueError(f"video_quality must be 'lowest' or 'highest', got '{video_quality}'")
         self._video_quality = video_quality
 
-    async def get_courses(self) -> list[Course]:
-        page = self._browser.page
+    async def _get_semester_url(self, page, semester_label: str | None = None) -> str:
+        """
+        Return the stable goto.php URL for the given semester.
+        If semester_label is None, returns the default 'Aktuelles Semester' URL.
 
-        # Step 1 – navigate to ILIAS main page
+        URL pattern: goto.php?target=iLUBModsSemester{labels_joined_by_underscore}&default={label}
+        Example:     goto.php?target=iLUBModsSemesterHS2026_FS2026_HS2025_FS2025_HS2024&default=HS2025
+        """
         await page.goto(f"{self._base_url}/ilias.php")
         await page.wait_for_load_state("networkidle")
-
-        # Step 2 – find "Aktuelles Semester" link and navigate to its href directly
         semester_link = page.locator("a:has-text('Aktuelles Semester')").first
         href = await semester_link.get_attribute("href", timeout=10_000)
         if not href:
-            raise RuntimeError(
-                f"Navigation item 'Aktuelles Semester' not found. URL: {page.url}"
-            )
-        target = href if href.startswith("http") else f"{self._base_url}/{href.lstrip('/')}"
-        await page.goto(target)
-        await page.wait_for_load_state("networkidle")
-        logger.info("Navigated to 'Aktuelles Semester'. URL: %s", page.url)
+            raise RuntimeError("Navigation item 'Aktuelles Semester' not found.")
+        full_href = href if href.startswith("http") else f"{self._base_url}/{href.lstrip('/')}"
+        if semester_label is None:
+            return full_href
+        # Substitute default= with the requested semester label
+        match = re.search(r"target=(iLUBModsSemester[^&]+)", href)
+        if not match:
+            raise RuntimeError(f"Cannot parse semester target from URL: {href}")
+        target_val = match.group(1)
+        return f"{self._base_url}/goto.php?target={target_val}&default={semester_label}"
 
-        # Step 4 – extract courses from the current page.
-        # Course items are rendered as <button data-action="...&ref_id=..."> inside
-        # .il-item-title — not as <a> tags.
+    async def get_semesters(self) -> list[Semester]:
+        """
+        Return all available semesters from the ILIAS dashboard.
+
+        Semester labels (e.g. "HS2025") are parsed from the 'Aktuelles Semester' goto URL
+        which encodes all available semesters in the target parameter:
+          target=iLUBModsSemesterHS2026_FS2026_HS2025_FS2025_HS2024
+        The active semester is detected via aria-pressed="true" on its tab button.
+        """
+        page = self._browser.page
+        default_url = await self._get_semester_url(page)
+        await page.goto(default_url)
+        await page.wait_for_load_state("networkidle")
+
+        # Parse semester labels from the goto URL target parameter
+        match = re.search(r"target=iLUBModsSemester([^&]+)", default_url)
+        if not match:
+            raise RuntimeError(f"Cannot parse semester list from URL: {default_url}")
+        semesters_str = match.group(1)
+        labels = semesters_str.split("_")
+
+        # Find active semester — its button has aria-pressed="true"
+        active_labels: set[str] = set()
+        for btn in await page.locator("button[aria-pressed='true']").all():
+            active_labels.add((await btn.inner_text()).strip())
+
+        semesters: list[Semester] = []
+        for label in labels:
+            sem_url = f"{self._base_url}/goto.php?target=iLUBModsSemester{semesters_str}&default={label}"
+            semesters.append(Semester(label=label, url=sem_url, is_current=(label in active_labels)))
+        logger.info("Found %d semester(s): %s", len(semesters), labels)
+        return semesters
+
+    async def get_courses(self, semester_label: str | None = None) -> list[Course]:
+        """
+        Return all courses for the given semester (or the current semester if None).
+        Uses the stable goto.php URL pattern — no session-specific parameters needed.
+        """
+        page = self._browser.page
+        target_url = await self._get_semester_url(page, semester_label)
+        await page.goto(target_url)
+        await page.wait_for_load_state("networkidle")
+        logger.info("Navigated to semester '%s'. URL: %s", semester_label or "current", page.url)
+
+        # Extract courses — rendered as <button data-action="...&ref_id=..."> inside .il-item-title
         courses: list[Course] = []
         seen: set[str] = set()
-
         selector = ".il-item-title button[data-action*='ref_id']"
         for btn in await page.locator(selector).all():
             action = await btn.get_attribute("data-action") or ""
@@ -234,7 +280,7 @@ class IliasCourseAdapter(ICoursePort):
                     )
                     courses.append(Course(title=title, ref_id=ref_id, url=full_url))
 
-        logger.info("Found %d course(s) in 'Aktuelles Semester'.", len(courses))
+        logger.info("Found %d course(s) for semester '%s'.", len(courses), semester_label or "current")
         return courses
 
     async def list_content(self, ref_id: RefId) -> list[ContentItem]:

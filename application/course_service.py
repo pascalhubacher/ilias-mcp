@@ -3,7 +3,7 @@ Application service — course listing use case.
 """
 
 from application.auth_service import AuthService
-from domain.models import ContentItem, Course, RefId, VideoItem
+from domain.models import ContentItem, Course, RefId, Semester, VideoItem
 from domain.ports import ICoursePort
 
 
@@ -14,10 +14,15 @@ class CourseService:
         self._course_port = course_port
         self._auth = auth_service
 
-    async def list_courses(self) -> list[Course]:
-        """Return all courses visible on the dashboard."""
+    async def list_semesters(self) -> list[Semester]:
+        """Return all available semesters from the ILIAS dashboard."""
         self._auth.require_authenticated()
-        return await self._course_port.get_courses()
+        return await self._course_port.get_semesters()
+
+    async def list_courses(self, semester_label: str | None = None) -> list[Course]:
+        """Return all courses for the given semester label (or current semester if None)."""
+        self._auth.require_authenticated()
+        return await self._course_port.get_courses(semester_label)
 
     async def list_course_content_docs(self, ref_id: RefId) -> list[ContentItem]:
         """Return the top-level INHALT items of a course (folders, podcasts, etc.)."""
