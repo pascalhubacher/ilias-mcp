@@ -237,10 +237,12 @@ class IliasCourseAdapter(ICoursePort):
         semesters_str = match.group(1)
         labels = semesters_str.split("_")
 
-        # Find active semester — its button has aria-pressed="true"
+        # Find active semester — its tab button has aria-pressed="true" and aria-label matching the label
         active_labels: set[str] = set()
-        for btn in await page.locator("button[aria-pressed='true']").all():
-            active_labels.add((await btn.inner_text()).strip())
+        for label in labels:
+            btn = page.locator(f"button[aria-label='{label}'][aria-pressed='true']").first
+            if await btn.count() > 0:
+                active_labels.add(label)
 
         semesters: list[Semester] = []
         for label in labels:
@@ -252,12 +254,31 @@ class IliasCourseAdapter(ICoursePort):
     async def get_courses(self, semester_label: str | None = None) -> list[Course]:
         """
         Return all courses for the given semester (or the current semester if None).
-        Uses the stable goto.php URL pattern — no session-specific parameters needed.
+
+        Navigation strategy:
+          1. Navigate to the stable goto.php URL (default={label}), which usually
+             pre-selects the requested semester via a server-side redirect.
+          2. Verify the active tab.  If ILIAS did not honour the default= parameter
+             (e.g. due to a server-side session preference), click the correct tab so
+             the page updates to the right semester before extracting courses.
         """
         page = self._browser.page
         target_url = await self._get_semester_url(page, semester_label)
         await page.goto(target_url)
         await page.wait_for_load_state("networkidle")
+
+        if semester_label:
+            active = page.locator(f"button[aria-label='{semester_label}'][aria-pressed='true']").first
+            if await active.count() == 0:
+                # The page landed on the wrong semester — click the correct tab.
+                tab = page.locator(f"button[aria-label='{semester_label}']").first
+                if await tab.count() > 0:
+                    await tab.click()
+                    await page.wait_for_load_state("networkidle")
+                    logger.debug("Clicked semester tab '%s' (default= URL didn't select it).", semester_label)
+                else:
+                    logger.warning("Semester tab '%s' not found on page.", semester_label)
+
         logger.info("Navigated to semester '%s'. URL: %s", semester_label or "current", page.url)
 
         # Extract courses — rendered as <button data-action="...&ref_id=..."> inside .il-item-title

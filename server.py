@@ -87,15 +87,15 @@ mcp = FastMCP(
         "lecture materials, Uni Bern, or ilias.unibe.ch.\n"
         "Workflow: always call `login` first, then use the other tools.\n"
         "- `login` — authenticate via Switch edu-ID\n"
-        "- `list_semesters` — list all available semesters (HS2025, FS2026, …); returns label + ref_id\n"
-        "- `list_courses` — list enrolled courses; pass semester_ref_id to filter by semester\n"
+        "- `list_semesters` — list all available semesters (e.g. HS2025, FS2026) with their labels\n"
+        "- `list_courses` — list enrolled courses; pass semester_label=\"HS2025\" to get courses from a specific semester\n"
         "- `list_course_content` — list all course content: auto-expands folders (files+download URLs) and Opencast series (videos+download URLs)\n"
         "- `list_course_content_docs` — list top-level INHALT items of a course (folders auto-expanded, no video expansion)\n"
         "- `list_course_content_video` — list Opencast video recordings for a specific series ref_id\n"
         "- `list_course_files` — recursively list all downloadable files in a course\n"
-        "- `download_course_files` — download all files from a single course; pass semester_ref_id + semester_label to target a specific semester (files saved to DOWNLOAD_DIR/<semester_label>/<course>/)\n"
-        "- `download_all_files` — download all files from all courses; pass semester_ref_id + semester_label to target a specific semester\n"
-        "Semester workflow: call list_semesters → ask user which semester → call list_courses(semester_ref_id=…) → download with semester_ref_id + semester_label"
+        "- `download_course_files` — download all files from a single course; pass semester_label to target a specific semester (files saved to DOWNLOAD_DIR/<semester_label>/<course>/)\n"
+        "- `download_all_files` — download all files from all courses; pass semester_label to target a specific semester\n"
+        "Semester workflow: call list_semesters → note the label (e.g. \"HS2025\") → call list_courses(semester_label=\"HS2025\") → verify response.semester matches → download with semester_label=\"HS2025\""
     ),
 )
 
