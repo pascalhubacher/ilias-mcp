@@ -35,29 +35,29 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def list_courses(
         ctx: Context[ServerSession, AppContext],
-        semester_label: str = "",
+        semester: str = "",
     ) -> dict:
         """
         List all courses for a given semester. Login first.
 
-        IMPORTANT: semester_label controls which semester is shown.
+        IMPORTANT: the semester parameter controls which semester is shown.
         - Always call list_semesters first to see available labels (e.g. "HS2025", "FS2026").
-        - Pass semester_label="HS2025" to get courses from HS2025.
-        - Leave semester_label empty to get courses from the current semester.
+        - Pass semester="HS2025" to get courses from HS2025.
+        - Leave semester empty to get courses from the current semester.
         - The response includes a "semester" field showing which semester was actually loaded —
           verify it matches what was requested.
 
         Args:
-            semester_label: Semester label to load, e.g. "HS2025" or "FS2026".
-                            Leave empty to use the current semester.
+            semester: Semester label to load, e.g. "HS2025" or "FS2026".
+                      Leave empty to use the current semester.
         """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("list_courses")
-        sem = semester_label or None
+        sem = semester or None
         logger.info("Tool 'list_courses' called (semester=%s).", sem or "current")
         courses = await app.course_service.list_courses(sem)
         return {
-            "semester": semester_label if semester_label else "current",
+            "semester": semester if semester else "current",
             "courses": [{"title": clean_text(c.title), "ref_id": c.ref_id, "url": c.url} for c in courses],
         }
 
