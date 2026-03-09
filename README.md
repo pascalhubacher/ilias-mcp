@@ -174,7 +174,30 @@ course's `ref_id`, title and URL.
 
 ## Available Claude Code skills
 
-These skills are invocable as slash commands inside Claude Code (e.g. type `/compressing-mp4-files` in the chat).
+Skills are invocable as slash commands inside Claude Code (e.g. type `/compressing-mp4-files` in the chat).
+
+### Installing skills
+
+Each skill is a folder inside `.claude/skills/` containing a `SKILL.md` file.
+When Claude Code is opened in this project directory, all skills in `.claude/skills/` are automatically available — no extra steps needed.
+
+To make a skill available **globally** (in every project):
+
+1. Copy the skill folder to your global Claude Code skills directory:
+
+   **Windows:**
+
+   ```bat
+   xcopy /E /I .claude\skills\compressing-mp4-files %USERPROFILE%\.claude\skills\compressing-mp4-files
+   ```
+
+   **macOS / Linux:**
+
+   ```bash
+   cp -r .claude/skills/compressing-mp4-files ~/.claude/skills/
+   ```
+
+2. The skill is then available as `/compressing-mp4-files` in any project you open with Claude Code.
 
 ### `/compressing-mp4-files`
 

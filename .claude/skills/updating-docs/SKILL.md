@@ -42,7 +42,25 @@ Keep it user-facing and concise. Required sections:
 - **Available MCP tools** — table derived from `@mcp.tool()` docstrings
 - **Configuration (.env)** — table of all env vars with required/optional flag
 - **Tests** — test command and coverage table (one row per test file)
-- **Available Claude Code skills** — one subsection per skill in `.claude/skills/`. Each subsection must clearly state:
+- **Available Claude Code skills** — a leading "Installing skills" subsection followed by one subsection per skill in `.claude/skills/`. The "Installing skills" subsection must explain:
+  - Skills live in `.claude/skills/` and are automatically available when Claude Code is opened in this project directory
+  - To install a skill globally (example for `compressing-mp4-files`):
+
+    **Windows:**
+
+    ```bat
+    xcopy /E /I .claude\skills\compressing-mp4-files %USERPROFILE%\.claude\skills\compressing-mp4-files
+    ```
+
+    **macOS / Linux:**
+
+    ```bash
+    cp -r .claude/skills/compressing-mp4-files ~/.claude/skills/
+    ```
+
+  - That after copying, the slash command becomes available in every project
+
+  Each per-skill subsection must clearly state:
   - What the skill does
   - How to invoke it (exact slash command, e.g. `/compressing-mp4-files`)
   - Any required arguments or preconditions (e.g. `.env` must be configured, `ffmpeg` must be installed)
