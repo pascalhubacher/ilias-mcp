@@ -9,3 +9,4 @@ build/
 *.egg-info/
 .playwright/
 ilias_downloads/
+.claude/settings.json
