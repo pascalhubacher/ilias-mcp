@@ -474,7 +474,9 @@ class IliasFileAdapter(IFilePort):
         download = await dl_info.value
         # Build filename from title + date; fall back to suggested filename
         if video.title:
-            safe_title = re.sub(r'[<>:"/\\|?*]', "_", video.title)
+            # Strip institutional prefix (e.g. "FS2026: " or "FS2026_ " or "450407-FS2026-0: ")
+            stripped_title = re.sub(r"^(?:\d+[\w-]*[_:]|[A-Z]+\d+[_:])\s*", "", video.title).strip() or video.title
+            safe_title = re.sub(r'[<>:"/\\|?*]', "_", stripped_title)
             date_part = f"_{video.date}" if video.date else ""
             suffix = Path(download.suggested_filename).suffix or ".mp4"
             raw_name = f"{safe_title}{date_part}{suffix}"

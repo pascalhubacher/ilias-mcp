@@ -128,7 +128,7 @@ class DownloadService:
         if course is None:
             raise ValueError(f"Course with ref_id={ref_id.value} not found.")
 
-        course_dir = output_dir / _safe_name(course.title, self._max_dirname_len)
+        course_dir = _course_dir(output_dir, course.title, self._max_dirname_len)
         course_dir.mkdir(parents=True, exist_ok=True)
         if sections is None:
             if log:
@@ -362,26 +362,75 @@ def _safe_name(name: str, max_len: int = 64) -> str:
     return sanitize_filename(name, max_len)
 
 
+def _strip_course_prefix(title: str) -> str:
+    """
+    Remove the institutional course-code prefix from a course title.
+    Strips patterns like "450407-FS2026-0_ " or "450407-FS2026-0: " (digits, dashes,
+    digits, then underscore or colon, then optional space) leaving only the
+    human-readable name, e.g. "Grundzüge Erdwissenschaften II".
+    If the title doesn't match the pattern it is returned unchanged.
+    """
+    return re.sub(r"^\d+[\w-]*[_:]\s*", "", title).strip() or title
+
+
+def _course_dir(output_dir: Path, course_title: str, max_dirname_len: int) -> Path:
+    """
+    Resolve the local directory for a course, preferring a clean stripped name.
+    Falls back to the legacy full-title directory if it already exists, so that
+    previously downloaded courses are recognised without re-downloading anything.
+    """
+    stripped = _strip_course_prefix(course_title)
+    new_dir = output_dir / _safe_name(stripped, max_dirname_len)
+    # Backward-compat: if old directory (full title) exists and new one doesn't, keep old path.
+    if stripped != course_title:
+        old_dir = output_dir / _safe_name(course_title, max_dirname_len)
+        if old_dir.exists() and not new_dir.exists():
+            return old_dir
+    return new_dir
+
+
+def _strip_video_title(title: str) -> str:
+    """
+    Remove the institutional prefix from a video title.
+    Strips patterns like "FS2026: " or "FS2026_ " (semester prefix) or "450407-FS2026-0: " (full code prefix).
+    Must mirror the logic in IliasFileAdapter.download_video.
+    """
+    return re.sub(r"^(?:\d+[\w-]*[_:]|[A-Z]+\d+[_:])\s*", "", title).strip() or title
+
+
 def _video_expected_path(video: VideoItem, course_dir: Path, max_len: int) -> Path | None:
     """
     Return the local path where a video would be saved.
     Mirrors the filename logic in IliasFileAdapter.download_video, assuming .mp4
-    as the default suffix.  Returns None if course_dir does not exist yet and no
-    glob match is found (the download has to happen first).
+    as the default suffix.  Returns None if no matching file is found.
+
+    Checks the stripped title (current behavior — semester prefix removed) first,
+    then falls back to the unstripped title for backward compatibility with files
+    downloaded before prefix stripping was introduced.
     """
-    safe_title = re.sub(r'[<>:"/\\|?*]', "_", video.title)
+    stripped_title = _strip_video_title(video.title)
     date_part = f"_{video.date}" if video.date else ""
-    raw_stem = f"{safe_title}{date_part}"
-    # Primary guess: .mp4 (default in download_video)
-    expected = course_dir / sanitize_filename(f"{raw_stem}.mp4", max_len)
-    if expected.exists():
-        return expected
-    # Fallback: any file with the same stem but different extension
-    if course_dir.exists():
-        stem = Path(sanitize_filename(f"{raw_stem}.mp4", max_len)).stem
-        matches = list(course_dir.glob(f"{glob_escape(stem)}.*"))
-        if matches:
-            return matches[0]
+
+    def _find(title_variant: str) -> Path | None:
+        safe = re.sub(r'[<>:"/\\|?*]', "_", title_variant)
+        raw_stem = f"{safe}{date_part}"
+        candidate = course_dir / sanitize_filename(f"{raw_stem}.mp4", max_len)
+        if candidate.exists():
+            return candidate
+        if course_dir.exists():
+            stem = Path(sanitize_filename(f"{raw_stem}.mp4", max_len)).stem
+            matches = list(course_dir.glob(f"{glob_escape(stem)}.*"))
+            if matches:
+                return matches[0]
+        return None
+
+    # Primary: stripped title (no semester prefix)
+    found = _find(stripped_title)
+    if found:
+        return found
+    # Backward compat: old files saved with semester prefix
+    if stripped_title != video.title:
+        return _find(video.title)
     return None
 
 
