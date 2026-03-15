@@ -181,23 +181,37 @@ Skills are invocable as slash commands inside Claude Code (e.g. type `/compressi
 Each skill is a folder inside `.claude/skills/` containing a `SKILL.md` file.
 When Claude Code is opened in this project directory, all skills in `.claude/skills/` are automatically available — no extra steps needed.
 
-To make a skill available **globally** (in every project):
+To make a skill available **globally** (from any folder / project), copy the skill folder into your user-level Claude Code skills directory:
 
-1. Copy the skill folder to your global Claude Code skills directory:
+| OS | Global skills directory |
+| --- | --- |
+| **Windows 11** | `%USERPROFILE%\.claude\skills\` (e.g. `C:\Users\YourName\.claude\skills\`) |
+| **macOS** | `~/.claude/skills/` (e.g. `/Users/YourName/.claude/skills/`) |
+| **Linux** | `~/.claude/skills/` (e.g. `/home/YourName/.claude/skills/`) |
 
-   **Windows:**
+Copy commands for each skill:
 
-   ```bat
-   xcopy /E /I .claude\skills\compressing-mp4-files %USERPROFILE%\.claude\skills\compressing-mp4-files
-   ```
+**Windows 11** (Command Prompt or PowerShell):
 
-   **macOS / Linux:**
+```bat
+xcopy /E /I /Y .claude\skills\compressing-mp4-files %USERPROFILE%\.claude\skills\compressing-mp4-files
+```
 
-   ```bash
-   cp -r .claude/skills/compressing-mp4-files ~/.claude/skills/
-   ```
+(`/Y` suppresses the overwrite confirmation — existing files are replaced silently.)
 
-2. The skill is then available as `/compressing-mp4-files` in any project you open with Claude Code.
+**macOS** (Terminal):
+
+```bash
+cp -rf .claude/skills/compressing-mp4-files ~/.claude/skills/
+```
+
+**Linux** (Terminal):
+
+```bash
+cp -rf .claude/skills/compressing-mp4-files ~/.claude/skills/
+```
+
+After copying, the skill is available as a slash command (e.g. `/compressing-mp4-files`) in any project you open with Claude Code — no restart required.
 
 ### `/compressing-mp4-files`
 
@@ -211,26 +225,46 @@ Compresses ILIAS course mp4 downloads to ≤ 200 MiB so they can be uploaded to 
 
 **Requires:** `DOWNLOAD_DIR` set in `.env`; `ffmpeg` and `ffprobe` on `PATH`.
 
-Install ffmpeg: `winget install Gyan.FFmpeg` (Windows) · `brew install ffmpeg` (macOS) · `sudo apt install ffmpeg` (Debian/Ubuntu)
+#### Installing ffmpeg
 
-The skill reads `DOWNLOAD_DIR`, skips files already ≤ 200 MiB, and for each oversized file runs ffmpeg two-pass encoding at a calculated bitrate. Output is saved as `<original-stem>-compressed.mp4` alongside the original. Finishes with a summary table showing original size, compressed size, ratio, and status per file.
+| OS | Command |
+| --- | --- |
+| **Windows 11** | `winget install Gyan.FFmpeg` |
+| **macOS** | `brew install ffmpeg` |
+| **Debian/Ubuntu** | `sudo apt install ffmpeg` |
 
-### `/updating-docs`
+#### Adding ffmpeg to PATH
 
-Updates `README.md` and `CLAUDE.md` to reflect the current state of the codebase. No arguments needed.
+If ffmpeg is installed but not found, add its `bin/` folder to your PATH:
 
-```text
-/updating-docs
+**Windows 11** — permanent (PowerShell, then restart terminal):
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+    "Path",
+    [System.Environment]::GetEnvironmentVariable("Path", "User") + ";C:\path\to\ffmpeg\bin",
+    "User"
+)
 ```
 
-Run this after adding or changing tools, env vars, domain models, adapters, or any project file. The skill reads all source files, compares them against existing docs, rewrites both `README.md` (user-facing) and `CLAUDE.md` (complete verbatim source for AI reconstruction), and prints a summary of every change made.
+Or via GUI: *Start → "Edit the system environment variables" → Environment Variables → User variables → Path → Edit → New*.
 
-### `/checking-mcp-compliance`
+**macOS** — add to `~/.zprofile` (zsh, default since macOS Catalina):
 
-Performs a live MCP Python SDK compliance audit against current best practices. No arguments needed.
-
-```text
-/checking-mcp-compliance
+```bash
+echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.zprofile
+source ~/.zprofile
 ```
 
-Fetches up-to-date MCP best-practice rules, checks each rule against the codebase, and reports any violations or improvements needed.
+*(Homebrew installs ffmpeg to `/usr/local/bin` on Intel or `/opt/homebrew/bin` on Apple Silicon — adjust path if needed.)*
+
+**Linux** — add to `~/.bashrc` (or `~/.profile` for login shells):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+*(When installed via `apt`, ffmpeg is placed in `/usr/bin` which is already on PATH.)*
+
+The skill reads `DOWNLOAD_DIR`, sorts all mp4 files per folder by their embedded `creation_time` metadata tag (read via `ffprobe`; falls back to filesystem mtime if absent), and assigns a two-digit sequential prefix: `01_`, `02_`, `03_`, … Files already ≤ 200 MiB are copied as-is (no re-encoding). Files over 200 MiB are compressed via ffmpeg two-pass encoding at a calculated bitrate. The output is saved as `<NN>_<original-filename>.mp4` alongside the original (e.g. `01_lecture.mp4`). On subsequent runs, files are recognised as already compressed if any `\d{2}_<original-name>` counterpart exists — even if the index has shifted due to newly added files. Finishes with a summary table showing original filename, output filename, sizes, ratio, and status per file.
