@@ -6,17 +6,29 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from domain.models import RefId
 from domain.utils import clean_text
 from interface.context import AppContext, app_from_ctx
+from interface.schemas import (
+    ContentFileOut,
+    ContentItemOut,
+    CourseFileOut,
+    CourseListOut,
+    CourseOut,
+    SemesterOut,
+    VideoOut,
+)
 
 logger = logging.getLogger(__name__)
 
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
+
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
-    async def list_semesters(ctx: Context[ServerSession, AppContext]) -> list[dict]:
+    @mcp.tool(title="List Semesters", annotations=_READ_ONLY)
+    async def list_semesters(ctx: Context[ServerSession, AppContext]) -> list[SemesterOut]:
         """
         List all available semesters on the ILIAS dashboard. Login first.
         Returns each semester's label (e.g. "HS2025") and whether it is the current one.
@@ -28,15 +40,15 @@ def register(mcp: FastMCP) -> None:
         logger.info("Tool 'list_semesters' called.")
         semesters = await app.course_service.list_semesters()
         return [
-            {"label": s.label, "url": s.url, "is_current": s.is_current}
+            SemesterOut(label=s.label, url=s.url, is_current=s.is_current)
             for s in semesters
         ]
 
-    @mcp.tool()
+    @mcp.tool(title="List Courses", annotations=_READ_ONLY)
     async def list_courses(
         ctx: Context[ServerSession, AppContext],
         semester: str = "",
-    ) -> dict:
+    ) -> CourseListOut:
         """
         List all courses for a given semester. Login first.
 
@@ -56,13 +68,13 @@ def register(mcp: FastMCP) -> None:
         sem = semester or None
         logger.info("Tool 'list_courses' called (semester=%s).", sem or "current")
         courses = await app.course_service.list_courses(sem)
-        return {
-            "semester": semester if semester else "current",
-            "courses": [{"title": clean_text(c.title), "ref_id": c.ref_id, "url": c.url} for c in courses],
-        }
+        return CourseListOut(
+            semester=semester if semester else "current",
+            courses=[CourseOut(title=clean_text(c.title), ref_id=c.ref_id, url=c.url) for c in courses],
+        )
 
-    @mcp.tool()
-    async def list_course_content_docs(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Documents", annotations=_READ_ONLY)
+    async def list_course_content_docs(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[ContentItemOut]:
         """
         List the top-level INHALT items of a course. Folder items are automatically
         expanded to include their files (title, file_name, file_type, url).
@@ -75,20 +87,20 @@ def register(mcp: FastMCP) -> None:
         logger.info("Tool 'list_course_content_docs' called with ref_id=%s.", ref_id)
         items = await app.course_service.list_course_content_docs(RefId(ref_id))
 
-        result = []
+        result: list[ContentItemOut] = []
         for item in items:
-            entry: dict = {"title": clean_text(item.title), "ref_id": item.ref_id, "url": item.url, "type": item.item_type}
+            entry = ContentItemOut(title=clean_text(item.title), ref_id=item.ref_id, url=item.url, type=item.item_type)
             if "ordner" in item.item_type.lower():
                 files = await app.download_service.list_course_files(RefId(item.ref_id))
-                entry["files"] = [
-                    {"title": clean_text(f.title), "file_name": f.file_name, "file_type": f.file_type, "download_url": f.url}
+                entry.files = [
+                    ContentFileOut(title=clean_text(f.title), file_name=f.file_name, file_type=f.file_type, download_url=f.url)
                     for f in files
                 ]
             result.append(entry)
         return result
 
-    @mcp.tool()
-    async def list_course_content_video(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Videos", annotations=_READ_ONLY)
+    async def list_course_content_video(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[VideoOut]:
         """
         List all Opencast video recordings in a course's video series.
 
@@ -100,11 +112,14 @@ def register(mcp: FastMCP) -> None:
         logger.info("Tool 'list_course_content_video' called with ref_id=%s.", ref_id)
         videos = await app.course_service.list_course_content_video(RefId(ref_id))
         return [
-            {"title": clean_text(v.title), "event_id": v.event_id, "date": clean_text(v.date), "url": v.url, "download_url": v.download_url, "subtitle_url": v.subtitle_url}
+            VideoOut(
+                title=clean_text(v.title), event_id=v.event_id, date=clean_text(v.date),
+                url=v.url, download_url=v.download_url, subtitle_url=v.subtitle_url,
+            )
             for v in videos
         ]
 
-    @mcp.tool()
+    @mcp.tool(title="List Course Content", annotations=_READ_ONLY)
     async def list_course_content(ctx: Context[ServerSession, AppContext], ref_id: str) -> str:
         """
         List all content of a course. Automatically expands:
@@ -140,8 +155,8 @@ def register(mcp: FastMCP) -> None:
                 lines.append(f"  URL: {s.item.url}")
         return "\n".join(lines)
 
-    @mcp.tool()
-    async def list_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Files", annotations=_READ_ONLY)
+    async def list_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[CourseFileOut]:
         """
         Recursively list all downloadable files in a course.
 
@@ -152,4 +167,4 @@ def register(mcp: FastMCP) -> None:
         app.rate_limiter.check("list_course_files")
         logger.info("Tool 'list_course_files' called with ref_id=%s.", ref_id)
         files = await app.download_service.list_course_files(RefId(ref_id))
-        return [{"title": clean_text(f.title), "file_name": f.file_name, "file_type": f.file_type, "url": f.url} for f in files]
+        return [CourseFileOut(title=clean_text(f.title), file_name=f.file_name, file_type=f.file_type, url=f.url) for f in files]

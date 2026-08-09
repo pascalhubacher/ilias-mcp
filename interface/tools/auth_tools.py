@@ -6,6 +6,7 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from interface.context import AppContext, app_from_ctx
 
@@ -13,7 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
+    @mcp.tool(
+        title="Login to ILIAS",
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+        ),
+    )
     async def login(ctx: Context[ServerSession, AppContext]) -> str:
         """Login to ILIAS via Switch edu-ID using the credentials from .env."""
         app = app_from_ctx(ctx)

@@ -7,12 +7,21 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from application.download_service import DownloadTracker, _build_summary
 from domain.models import RefId
 from interface.context import AppContext, app_from_ctx
 
 logger = logging.getLogger(__name__)
+
+# Downloads write new files and occasionally overwrite a stale local copy
+# (on remote/local size mismatch) — not read-only, and destructiveHint=True
+# reflects that possible overwrite so clients can prompt before running it.
+_DOWNLOAD = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
+)
+_STATUS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 
 
 def _progress_log(ctx: Context[ServerSession, AppContext], collector: list[str]):
@@ -28,7 +37,7 @@ def _progress_log(ctx: Context[ServerSession, AppContext], collector: list[str])
 
 
 def register(mcp: FastMCP, download_dir: str) -> None:
-    @mcp.tool()
+    @mcp.tool(title="Download Course Files", annotations=_DOWNLOAD)
     async def download_course_files(
         ctx: Context[ServerSession, AppContext],
         ref_id: str,
@@ -61,7 +70,7 @@ def register(mcp: FastMCP, download_dir: str) -> None:
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
 
-    @mcp.tool()
+    @mcp.tool(title="Download All Files", annotations=_DOWNLOAD)
     async def download_all_files(
         ctx: Context[ServerSession, AppContext],
         semester: str = "",
@@ -88,7 +97,7 @@ def register(mcp: FastMCP, download_dir: str) -> None:
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
 
-    @mcp.tool()
+    @mcp.tool(title="Download Status", annotations=_STATUS)
     async def download_status(ctx: Context[ServerSession, AppContext]) -> str:
         """
         Show the current download progress: pending, active, done, and skipped files with file sizes.
