@@ -10,3 +10,4 @@ build/
 .playwright/
 ilias_downloads/
 .claude/settings.json
+.vscode/settings.json
