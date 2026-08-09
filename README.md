@@ -153,24 +153,30 @@ The value is the Shibboleth IdP entity-ID shown in the institution dropdown on y
 
 ## Available MCP tools
 
-| Tool | Description |
-| --- | --- |
-| `login` | Log in to ILIAS using the credentials from `.env` |
-| `list_courses` | List all courses from the current semester ("Aktuelles Semester" navigation item) |
-| `list_course_content` | List all course content — auto-expands folders (files + download URLs), Opencast series (videos + download URLs + subtitle URLs), and top-level documents |
-| `list_course_content_docs` | List top-level INHALT items of a course; folder items are auto-expanded to include their files |
-| `list_course_content_video` | List all Opencast video recordings in a series (needs `ref_id` from `list_course_content_docs`) |
-| `list_course_files` | Recursively list all downloadable files in a course (needs `ref_id` from `list_courses`) |
-| `download_course_files` | Download all files from a single course to `DOWNLOAD_DIR` (needs `ref_id` from `list_courses`) |
-| `download_all_files` | Download every file from every course to `DOWNLOAD_DIR` |
-| `download_status` | Show current download progress (pending / active / done / skipped / error with file sizes) |
+| Tool | Description | Annotations |
+| --- | --- | --- |
+| `login` | Log in to ILIAS using the credentials from `.env` | not read-only, not destructive, idempotent, open-world |
+| `list_semesters` | List all available semesters (e.g. `HS2025`, `FS2026`) and which one is currently active | read-only, idempotent, open-world |
+| `list_courses` | List all courses for a given semester (`semester="HS2025"`, or the current semester if omitted) | read-only, idempotent, open-world |
+| `list_course_content` | List all course content — auto-expands folders (files + download URLs), Opencast series (videos + download URLs + subtitle URLs), and top-level documents | read-only, idempotent, open-world |
+| `list_course_content_docs` | List top-level INHALT items of a course; folder items are auto-expanded to include their files | read-only, idempotent, open-world |
+| `list_course_content_video` | List all Opencast video recordings in a series (needs `ref_id` from `list_course_content_docs`) | read-only, idempotent, open-world |
+| `list_course_files` | Recursively list all downloadable files in a course (needs `ref_id` from `list_courses`) | read-only, idempotent, open-world |
+| `download_course_files` | Download all files from a single course to `DOWNLOAD_DIR` (needs `ref_id` from `list_courses`; optional `semester="HS2025"` saves to `DOWNLOAD_DIR/HS2025/<course>/`) | not read-only, destructive*, idempotent, open-world |
+| `download_all_files` | Download every file from every course to `DOWNLOAD_DIR` (optional `semester="HS2025"`) | not read-only, destructive*, idempotent, open-world |
+| `download_status` | Show current download progress (pending / active / done / skipped / error with file sizes) | read-only, idempotent, closed-world |
+
+\* `destructive` because a local/remote file-size mismatch triggers a re-download that overwrites the existing local file (see "Download skip logic" in `CLAUDE.md`). Annotations follow the [MCP tool spec](https://modelcontextprotocol.io/docs/concepts/tools) — MCP clients use them to decide when to prompt for confirmation before invoking a tool.
+
+List-returning tools (`list_semesters`, `list_courses`, `list_course_content_docs`, `list_course_content_video`, `list_course_files`) return typed structured content (`structuredContent`) in addition to human-readable text, validated against a Pydantic model in `interface/schemas.py`. Report-style tools (`login`, `list_course_content`, `download_course_files`, `download_all_files`, `download_status`) return a plain formatted text summary.
 
 ### How `list_courses` works
 
-After login, the adapter navigates to the **"Aktuelles Semester"** entry in the ILIAS sidebar.
-Course items are rendered as `<button data-action="...&ref_id=...">` elements inside `.il-item-title`
-(not as plain `<a>` links), so the adapter reads the `data-action` attribute to extract each
-course's `ref_id`, title and URL.
+After login, the adapter navigates to the **"Aktuelles Semester"** entry in the ILIAS sidebar (or
+the semester selected via `list_semesters` + the `semester` parameter). Course items are rendered
+as `<button data-action="...&ref_id=...">` elements inside `.il-item-title` (not as plain `<a>`
+links), so the adapter reads the `data-action` attribute to extract each course's `ref_id`, title
+and URL.
 
 ## Available Claude Code skills
 

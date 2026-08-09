@@ -1,8 +1,8 @@
 # ilias-mcp — Complete Reconstruction Specification
 
 An MCP server that connects to the ILIAS university learning platform (ilias.unibe.ch, Uni Bern)
-via Switch edu-ID SSO. Allows an AI assistant to list courses, explore content, and download
-files/videos from ILIAS through a headless Chromium browser (Playwright).
+via Switch edu-ID SSO. Allows an AI assistant to list semesters, courses, explore content, and
+download files/videos from ILIAS through a headless Chromium browser (Playwright).
 
 ---
 
@@ -17,7 +17,7 @@ ilias-mcp/
 │   ├── __init__.py
 │   ├── models.py                      # Frozen dataclass value objects
 │   ├── ports.py                       # Abstract interfaces (ABCs)
-│   └── utils.py                       # sanitize_filename helper
+│   └── utils.py                       # sanitize_filename, clean_text helpers
 ├── application/
 │   ├── __init__.py
 │   ├── auth_service.py
@@ -30,6 +30,7 @@ ilias-mcp/
 ├── interface/
 │   ├── __init__.py
 │   ├── context.py                     # AppContext, RateLimiter
+│   ├── schemas.py                     # Pydantic response models for structured MCP tool output
 │   └── tools/
 │       ├── __init__.py
 │       ├── auth_tools.py
@@ -48,7 +49,9 @@ ilias-mcp/
 server.py → interface/ → application/ → domain/ports ← infrastructure/
 ```
 Infrastructure depends on domain ports (inward). Application depends on ports. Interface depends
-on application. Nothing in domain/ depends on any other layer.
+on application. Nothing in domain/ depends on any other layer. `interface/schemas.py` depends only
+on `pydantic` (already a transitive dependency of `mcp`) — it holds no business logic, only the
+response shapes tools return so FastMCP can derive a typed `outputSchema` per the MCP spec.
 
 ---
 
@@ -180,6 +183,14 @@ class ExpandedContentItem:
 
 
 @dataclass(frozen=True)
+class Semester:
+    """Represents a semester grouping on the ILIAS dashboard."""
+    label: str       # e.g. "HS2025", "FS2026" — the unique identifier
+    url: str         # Stable goto.php URL to this semester's course listing page
+    is_current: bool = False  # True if this is the currently active/selected semester
+
+
+@dataclass(frozen=True)
 class RefId:
     """
     Value object for an ILIAS repository reference ID.
@@ -212,7 +223,7 @@ Concrete implementations live in infrastructure/.
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .models import ContentItem, Course, CourseFile, LoginCredentials, RefId, VideoItem
+from .models import ContentItem, Course, CourseFile, LoginCredentials, RefId, Semester, VideoItem
 
 
 class IAuthPort(ABC):
@@ -230,8 +241,12 @@ class ICoursePort(ABC):
     """Port for reading courses from ILIAS."""
 
     @abstractmethod
-    async def get_courses(self) -> list[Course]:
-        """Return all courses visible on the ILIAS dashboard."""
+    async def get_semesters(self) -> list[Semester]:
+        """Return all available semesters from the ILIAS dashboard."""
+
+    @abstractmethod
+    async def get_courses(self, semester_label: str | None = None) -> list[Course]:
+        """Return all courses for the given semester label (or current semester if None)."""
 
     @abstractmethod
     async def list_content(self, ref_id: RefId) -> list[ContentItem]:
@@ -272,6 +287,11 @@ Domain utilities — pure helper functions with no external dependencies.
 """
 
 import re
+
+
+def clean_text(s: str) -> str:
+    """Strip ASCII control characters from a scraped string (keeps tab and newline)."""
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", s)
 
 
 def sanitize_filename(name: str, max_len: int) -> str:
@@ -337,7 +357,7 @@ Application service — course listing use case.
 """
 
 from application.auth_service import AuthService
-from domain.models import ContentItem, Course, RefId, VideoItem
+from domain.models import ContentItem, Course, RefId, Semester, VideoItem
 from domain.ports import ICoursePort
 
 
@@ -348,10 +368,15 @@ class CourseService:
         self._course_port = course_port
         self._auth = auth_service
 
-    async def list_courses(self) -> list[Course]:
-        """Return all courses visible on the dashboard."""
+    async def list_semesters(self) -> list[Semester]:
+        """Return all available semesters from the ILIAS dashboard."""
         self._auth.require_authenticated()
-        return await self._course_port.get_courses()
+        return await self._course_port.get_semesters()
+
+    async def list_courses(self, semester_label: str | None = None) -> list[Course]:
+        """Return all courses for the given semester label (or current semester if None)."""
+        self._auth.require_authenticated()
+        return await self._course_port.get_courses(semester_label)
 
     async def list_course_content_docs(self, ref_id: RefId) -> list[ContentItem]:
         """Return the top-level INHALT items of a course (folders, podcasts, etc.)."""
@@ -484,20 +509,22 @@ class DownloadService:
         tracker: DownloadTracker | None = None,
         log: ProgressCB = None,
         sections: list[ExpandedContentItem] | None = None,
+        semester_label: str | None = None,
     ) -> tuple[int, int]:
         """
         Download all files of a single course into output_dir/<course_title>/.
         Returns (downloaded, skipped) counts.
         If *sections* is provided (pre-fetched via list_course_content), the
         content scan is skipped; otherwise list_course_content is called here.
+        *semester_label* is forwarded to list_courses to fetch from the correct semester.
         """
         self._auth.require_authenticated()
-        courses = await self._course_service.list_courses()
+        courses = await self._course_service.list_courses(semester_label)
         course = next((c for c in courses if c.ref_id == ref_id.value), None)
         if course is None:
             raise ValueError(f"Course with ref_id={ref_id.value} not found.")
 
-        course_dir = output_dir / _safe_name(course.title, self._max_dirname_len)
+        course_dir = _course_dir(output_dir, course.title, self._max_dirname_len)
         course_dir.mkdir(parents=True, exist_ok=True)
         if sections is None:
             if log:
@@ -671,10 +698,13 @@ class DownloadService:
         output_dir: Path,
         tracker: DownloadTracker | None = None,
         log: ProgressCB = None,
+        semester_label: str | None = None,
     ) -> str:
         """
         Download every file from every course into output_dir/<course_title>/.
         Skips files that already exist. Returns a human-readable summary report.
+        *semester_label* restricts the download to a specific semester; if None,
+        the current semester is used.
 
         Two-phase approach:
         1. Scan all courses via list_course_content to discover their content.
@@ -684,7 +714,7 @@ class DownloadService:
         if tracker is not None:
             tracker.reset()
 
-        courses = await self._course_service.list_courses()
+        courses = await self._course_service.list_courses(semester_label)
 
         # Phase 1: discover content of every course
         if log:
@@ -716,6 +746,7 @@ class DownloadService:
                 tracker,
                 log=log,
                 sections=course_sections[course.ref_id],
+                semester_label=semester_label,
             )
             total_downloaded += downloaded
             total_skipped += skipped
@@ -727,26 +758,75 @@ def _safe_name(name: str, max_len: int = 64) -> str:
     return sanitize_filename(name, max_len)
 
 
+def _strip_course_prefix(title: str) -> str:
+    """
+    Remove the institutional course-code prefix from a course title.
+    Strips patterns like "450407-FS2026-0_ " or "450407-FS2026-0: " (digits, dashes,
+    digits, then underscore or colon, then optional space) leaving only the
+    human-readable name, e.g. "Grundzüge Erdwissenschaften II".
+    If the title doesn't match the pattern it is returned unchanged.
+    """
+    return re.sub(r"^\d+[\w-]*[_:]\s*", "", title).strip() or title
+
+
+def _course_dir(output_dir: Path, course_title: str, max_dirname_len: int) -> Path:
+    """
+    Resolve the local directory for a course, preferring a clean stripped name.
+    Falls back to the legacy full-title directory if it already exists, so that
+    previously downloaded courses are recognised without re-downloading anything.
+    """
+    stripped = _strip_course_prefix(course_title)
+    new_dir = output_dir / _safe_name(stripped, max_dirname_len)
+    # Backward-compat: if old directory (full title) exists and new one doesn't, keep old path.
+    if stripped != course_title:
+        old_dir = output_dir / _safe_name(course_title, max_dirname_len)
+        if old_dir.exists() and not new_dir.exists():
+            return old_dir
+    return new_dir
+
+
+def _strip_video_title(title: str) -> str:
+    """
+    Remove the institutional prefix from a video title.
+    Strips patterns like "FS2026: " or "FS2026_ " (semester prefix) or "450407-FS2026-0: " (full code prefix).
+    Must mirror the logic in IliasFileAdapter.download_video.
+    """
+    return re.sub(r"^(?:\d+[\w-]*[_:]|[A-Z]+\d+[_:])\s*", "", title).strip() or title
+
+
 def _video_expected_path(video: VideoItem, course_dir: Path, max_len: int) -> Path | None:
     """
     Return the local path where a video would be saved.
     Mirrors the filename logic in IliasFileAdapter.download_video, assuming .mp4
-    as the default suffix.  Returns None if course_dir does not exist yet and no
-    glob match is found (the download has to happen first).
+    as the default suffix.  Returns None if no matching file is found.
+
+    Checks the stripped title (current behavior — semester prefix removed) first,
+    then falls back to the unstripped title for backward compatibility with files
+    downloaded before prefix stripping was introduced.
     """
-    safe_title = re.sub(r'[<>:"/\\|?*]', "_", video.title)
+    stripped_title = _strip_video_title(video.title)
     date_part = f"_{video.date}" if video.date else ""
-    raw_stem = f"{safe_title}{date_part}"
-    # Primary guess: .mp4 (default in download_video)
-    expected = course_dir / sanitize_filename(f"{raw_stem}.mp4", max_len)
-    if expected.exists():
-        return expected
-    # Fallback: any file with the same stem but different extension
-    if course_dir.exists():
-        stem = Path(sanitize_filename(f"{raw_stem}.mp4", max_len)).stem
-        matches = list(course_dir.glob(f"{glob_escape(stem)}.*"))
-        if matches:
-            return matches[0]
+
+    def _find(title_variant: str) -> Path | None:
+        safe = re.sub(r'[<>:"/\\|?*]', "_", title_variant)
+        raw_stem = f"{safe}{date_part}"
+        candidate = course_dir / sanitize_filename(f"{raw_stem}.mp4", max_len)
+        if candidate.exists():
+            return candidate
+        if course_dir.exists():
+            stem = Path(sanitize_filename(f"{raw_stem}.mp4", max_len)).stem
+            matches = list(course_dir.glob(f"{glob_escape(stem)}.*"))
+            if matches:
+                return matches[0]
+        return None
+
+    # Primary: stripped title (no semester prefix)
+    found = _find(stripped_title)
+    if found:
+        return found
+    # Backward compat: old files saved with semester prefix
+    if stripped_title != video.title:
+        return _find(video.title)
     return None
 
 
@@ -884,7 +964,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from domain.models import ContentItem, Course, CourseFile, LoginCredentials, RefId, VideoItem
+from domain.models import ContentItem, Course, CourseFile, LoginCredentials, RefId, Semester, VideoItem
 from domain.ports import IAuthPort, ICoursePort, IFilePort
 from domain.utils import sanitize_filename
 from infrastructure.browser import BrowserManager
@@ -1060,31 +1140,98 @@ class IliasCourseAdapter(ICoursePort):
             raise ValueError(f"video_quality must be 'lowest' or 'highest', got '{video_quality}'")
         self._video_quality = video_quality
 
-    async def get_courses(self) -> list[Course]:
-        page = self._browser.page
+    async def _get_semester_url(self, page, semester_label: str | None = None) -> str:
+        """
+        Return the stable goto.php URL for the given semester.
+        If semester_label is None, returns the default 'Aktuelles Semester' URL.
 
-        # Step 1 – navigate to ILIAS main page
+        URL pattern: goto.php?target=iLUBModsSemester{labels_joined_by_underscore}&default={label}
+        Example:     goto.php?target=iLUBModsSemesterHS2026_FS2026_HS2025_FS2025_HS2024&default=HS2025
+        """
         await page.goto(f"{self._base_url}/ilias.php")
         await page.wait_for_load_state("networkidle")
-
-        # Step 2 – find "Aktuelles Semester" link and navigate to its href directly
         semester_link = page.locator("a:has-text('Aktuelles Semester')").first
         href = await semester_link.get_attribute("href", timeout=10_000)
         if not href:
-            raise RuntimeError(
-                f"Navigation item 'Aktuelles Semester' not found. URL: {page.url}"
-            )
-        target = href if href.startswith("http") else f"{self._base_url}/{href.lstrip('/')}"
-        await page.goto(target)
-        await page.wait_for_load_state("networkidle")
-        logger.info("Navigated to 'Aktuelles Semester'. URL: %s", page.url)
+            raise RuntimeError("Navigation item 'Aktuelles Semester' not found.")
+        full_href = href if href.startswith("http") else f"{self._base_url}/{href.lstrip('/')}"
+        if semester_label is None:
+            return full_href
+        # Substitute default= with the requested semester label
+        match = re.search(r"target=(iLUBModsSemester[^&]+)", href)
+        if not match:
+            raise RuntimeError(f"Cannot parse semester target from URL: {href}")
+        target_val = match.group(1)
+        return f"{self._base_url}/goto.php?target={target_val}&default={semester_label}"
 
-        # Step 4 – extract courses from the current page.
-        # Course items are rendered as <button data-action="...&ref_id=..."> inside
-        # .il-item-title — not as <a> tags.
+    async def get_semesters(self) -> list[Semester]:
+        """
+        Return all available semesters from the ILIAS dashboard.
+
+        Semester labels (e.g. "HS2025") are parsed from the 'Aktuelles Semester' goto URL
+        which encodes all available semesters in the target parameter:
+          target=iLUBModsSemesterHS2026_FS2026_HS2025_FS2025_HS2024
+        The active semester is detected via aria-pressed="true" on its tab button.
+        """
+        page = self._browser.page
+        default_url = await self._get_semester_url(page)
+        await page.goto(default_url)
+        await page.wait_for_load_state("networkidle")
+
+        # Parse semester labels from the goto URL target parameter
+        match = re.search(r"target=iLUBModsSemester([^&]+)", default_url)
+        if not match:
+            raise RuntimeError(f"Cannot parse semester list from URL: {default_url}")
+        semesters_str = match.group(1)
+        labels = semesters_str.split("_")
+
+        # Find active semester — its tab button has aria-pressed="true" and aria-label matching the label
+        active_labels: set[str] = set()
+        for label in labels:
+            btn = page.locator(f"button[aria-label='{label}'][aria-pressed='true']").first
+            if await btn.count() > 0:
+                active_labels.add(label)
+
+        semesters: list[Semester] = []
+        for label in labels:
+            sem_url = f"{self._base_url}/goto.php?target=iLUBModsSemester{semesters_str}&default={label}"
+            semesters.append(Semester(label=label, url=sem_url, is_current=(label in active_labels)))
+        logger.info("Found %d semester(s): %s", len(semesters), labels)
+        return semesters
+
+    async def get_courses(self, semester_label: str | None = None) -> list[Course]:
+        """
+        Return all courses for the given semester (or the current semester if None).
+
+        Navigation strategy:
+          1. Navigate to the stable goto.php URL (default={label}), which usually
+             pre-selects the requested semester via a server-side redirect.
+          2. Verify the active tab.  If ILIAS did not honour the default= parameter
+             (e.g. due to a server-side session preference), click the correct tab so
+             the page updates to the right semester before extracting courses.
+        """
+        page = self._browser.page
+        target_url = await self._get_semester_url(page, semester_label)
+        await page.goto(target_url)
+        await page.wait_for_load_state("networkidle")
+
+        if semester_label:
+            active = page.locator(f"button[aria-label='{semester_label}'][aria-pressed='true']").first
+            if await active.count() == 0:
+                # The page landed on the wrong semester — click the correct tab.
+                tab = page.locator(f"button[aria-label='{semester_label}']").first
+                if await tab.count() > 0:
+                    await tab.click()
+                    await page.wait_for_load_state("networkidle")
+                    logger.debug("Clicked semester tab '%s' (default= URL didn't select it).", semester_label)
+                else:
+                    logger.warning("Semester tab '%s' not found on page.", semester_label)
+
+        logger.info("Navigated to semester '%s'. URL: %s", semester_label or "current", page.url)
+
+        # Extract courses — rendered as <button data-action="...&ref_id=..."> inside .il-item-title
         courses: list[Course] = []
         seen: set[str] = set()
-
         selector = ".il-item-title button[data-action*='ref_id']"
         for btn in await page.locator(selector).all():
             action = await btn.get_attribute("data-action") or ""
@@ -1102,7 +1249,7 @@ class IliasCourseAdapter(ICoursePort):
                     )
                     courses.append(Course(title=title, ref_id=ref_id, url=full_url))
 
-        logger.info("Found %d course(s) in 'Aktuelles Semester'.", len(courses))
+        logger.info("Found %d course(s) for semester '%s'.", len(courses), semester_label or "current")
         return courses
 
     async def list_content(self, ref_id: RefId) -> list[ContentItem]:
@@ -1275,7 +1422,9 @@ class IliasFileAdapter(IFilePort):
         download = await dl_info.value
         # Build filename from title + date; fall back to suggested filename
         if video.title:
-            safe_title = re.sub(r'[<>:"/\\|?*]', "_", video.title)
+            # Strip institutional prefix (e.g. "FS2026: " or "FS2026_ " or "450407-FS2026-0: ")
+            stripped_title = re.sub(r"^(?:\d+[\w-]*[_:]|[A-Z]+\d+[_:])\s*", "", video.title).strip() or video.title
+            safe_title = re.sub(r'[<>:"/\\|?*]', "_", stripped_title)
             date_part = f"_{video.date}" if video.date else ""
             suffix = Path(download.suggested_filename).suffix or ".mp4"
             raw_name = f"{safe_title}{date_part}{suffix}"
@@ -1307,15 +1456,15 @@ class IliasFileAdapter(IFilePort):
             subtitle_path = video_path.with_suffix(suffix)
             await download.save_as(subtitle_path)
             logger.info("Saved subtitle: %s", subtitle_path)
-        except Exception as exc:
-            logger.warning("Failed to download subtitle for '%s': %s", video.title, exc)
+        except (PlaywrightError, OSError):
+            logger.warning("Failed to download subtitle for '%s'", video.title, exc_info=True)
 
     async def get_remote_size(self, url: str) -> int | None:
         try:
             response = await self._browser.page.context.request.head(url)
             cl = response.headers.get("content-length")
             return int(cl) if cl else None
-        except Exception:
+        except (PlaywrightError, OSError, ValueError):
             return None
 
     async def _collect(self, ref_id: str, files: list, visited: set, seen_urls: set | None = None) -> None:
@@ -1460,6 +1609,80 @@ def app_from_ctx(ctx: Context[ServerSession, "AppContext"]) -> "AppContext":
 
 ---
 
+## interface/schemas.py
+
+Pydantic response models for MCP tool structured output. FastMCP derives each tool's
+`outputSchema` from its return type annotation — returning these models (instead of a bare
+`dict`/`list[dict]`) gives clients and LLMs a validated, typed `structuredContent` block per the
+MCP tool spec, instead of a generic untyped object schema.
+
+```python
+"""
+Interface layer — Pydantic response models for MCP tool structured output.
+
+FastMCP derives each tool's outputSchema from its return type annotation.
+Returning these models (instead of bare dict/list[dict]) gives clients and
+LLMs a validated, typed structuredContent block per the MCP tool spec.
+"""
+
+from pydantic import BaseModel
+
+
+class SemesterOut(BaseModel):
+    label: str
+    url: str
+    is_current: bool
+
+
+class CourseOut(BaseModel):
+    title: str
+    ref_id: str
+    url: str
+
+
+class CourseListOut(BaseModel):
+    semester: str
+    courses: list[CourseOut]
+
+
+class CourseFileOut(BaseModel):
+    title: str
+    file_name: str
+    file_type: str
+    url: str
+
+
+class ContentFileOut(BaseModel):
+    title: str
+    file_name: str
+    file_type: str
+    download_url: str
+
+
+class ContentItemOut(BaseModel):
+    title: str
+    ref_id: str
+    url: str
+    type: str
+    files: list[ContentFileOut] | None = None
+
+
+class VideoOut(BaseModel):
+    title: str
+    event_id: str
+    date: str
+    url: str
+    download_url: str
+    subtitle_url: str
+```
+
+Tools that return a formatted, human-readable report (`list_course_content`, `login`,
+`download_course_files`, `download_all_files`, `download_status`) intentionally keep a plain
+`str` return type instead of one of these models — they are text summaries, not structured data,
+matching the SDK's own `echo`-style plain-text tool pattern.
+
+---
+
 ## interface/tools/auth_tools.py
 
 ```python
@@ -1471,6 +1694,7 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from interface.context import AppContext, app_from_ctx
 
@@ -1478,7 +1702,12 @@ logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
+    @mcp.tool(
+        title="Login to ILIAS",
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+        ),
+    )
     async def login(ctx: Context[ServerSession, AppContext]) -> str:
         """Login to ILIAS via Switch edu-ID using the credentials from .env."""
         app = app_from_ctx(ctx)
@@ -1500,25 +1729,75 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from domain.models import RefId
+from domain.utils import clean_text
 from interface.context import AppContext, app_from_ctx
+from interface.schemas import (
+    ContentFileOut,
+    ContentItemOut,
+    CourseFileOut,
+    CourseListOut,
+    CourseOut,
+    SemesterOut,
+    VideoOut,
+)
 
 logger = logging.getLogger(__name__)
 
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=True)
+
 
 def register(mcp: FastMCP) -> None:
-    @mcp.tool()
-    async def list_courses(ctx: Context[ServerSession, AppContext]) -> list[dict]:
-        """List all courses available on the ILIAS dashboard. Login first."""
+    @mcp.tool(title="List Semesters", annotations=_READ_ONLY)
+    async def list_semesters(ctx: Context[ServerSession, AppContext]) -> list[SemesterOut]:
+        """
+        List all available semesters on the ILIAS dashboard. Login first.
+        Returns each semester's label (e.g. "HS2025") and whether it is the current one.
+        Use the label with list_courses, download_course_files, and download_all_files
+        to target a specific semester.
+        """
+        app = app_from_ctx(ctx)
+        app.rate_limiter.check("list_semesters")
+        logger.info("Tool 'list_semesters' called.")
+        semesters = await app.course_service.list_semesters()
+        return [
+            SemesterOut(label=s.label, url=s.url, is_current=s.is_current)
+            for s in semesters
+        ]
+
+    @mcp.tool(title="List Courses", annotations=_READ_ONLY)
+    async def list_courses(
+        ctx: Context[ServerSession, AppContext],
+        semester: str = "",
+    ) -> CourseListOut:
+        """
+        List all courses for a given semester. Login first.
+
+        IMPORTANT: the semester parameter controls which semester is shown.
+        - Always call list_semesters first to see available labels (e.g. "HS2025", "FS2026").
+        - Pass semester="HS2025" to get courses from HS2025.
+        - Leave semester empty to get courses from the current semester.
+        - The response includes a "semester" field showing which semester was actually loaded —
+          verify it matches what was requested.
+
+        Args:
+            semester: Semester label to load, e.g. "HS2025" or "FS2026".
+                      Leave empty to use the current semester.
+        """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("list_courses")
-        logger.info("Tool 'list_courses' called.")
-        courses = await app.course_service.list_courses()
-        return [{"title": c.title, "ref_id": c.ref_id, "url": c.url} for c in courses]
+        sem = semester or None
+        logger.info("Tool 'list_courses' called (semester=%s).", sem or "current")
+        courses = await app.course_service.list_courses(sem)
+        return CourseListOut(
+            semester=semester if semester else "current",
+            courses=[CourseOut(title=clean_text(c.title), ref_id=c.ref_id, url=c.url) for c in courses],
+        )
 
-    @mcp.tool()
-    async def list_course_content_docs(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Documents", annotations=_READ_ONLY)
+    async def list_course_content_docs(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[ContentItemOut]:
         """
         List the top-level INHALT items of a course. Folder items are automatically
         expanded to include their files (title, file_name, file_type, url).
@@ -1531,20 +1810,20 @@ def register(mcp: FastMCP) -> None:
         logger.info("Tool 'list_course_content_docs' called with ref_id=%s.", ref_id)
         items = await app.course_service.list_course_content_docs(RefId(ref_id))
 
-        result = []
+        result: list[ContentItemOut] = []
         for item in items:
-            entry: dict = {"title": item.title, "ref_id": item.ref_id, "url": item.url, "type": item.item_type}
+            entry = ContentItemOut(title=clean_text(item.title), ref_id=item.ref_id, url=item.url, type=item.item_type)
             if "ordner" in item.item_type.lower():
                 files = await app.download_service.list_course_files(RefId(item.ref_id))
-                entry["files"] = [
-                    {"title": f.title, "file_name": f.file_name, "file_type": f.file_type, "download_url": f.url}
+                entry.files = [
+                    ContentFileOut(title=clean_text(f.title), file_name=f.file_name, file_type=f.file_type, download_url=f.url)
                     for f in files
                 ]
             result.append(entry)
         return result
 
-    @mcp.tool()
-    async def list_course_content_video(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Videos", annotations=_READ_ONLY)
+    async def list_course_content_video(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[VideoOut]:
         """
         List all Opencast video recordings in a course's video series.
 
@@ -1556,11 +1835,14 @@ def register(mcp: FastMCP) -> None:
         logger.info("Tool 'list_course_content_video' called with ref_id=%s.", ref_id)
         videos = await app.course_service.list_course_content_video(RefId(ref_id))
         return [
-            {"title": v.title, "event_id": v.event_id, "date": v.date, "url": v.url, "download_url": v.download_url, "subtitle_url": v.subtitle_url}
+            VideoOut(
+                title=clean_text(v.title), event_id=v.event_id, date=clean_text(v.date),
+                url=v.url, download_url=v.download_url, subtitle_url=v.subtitle_url,
+            )
             for v in videos
         ]
 
-    @mcp.tool()
+    @mcp.tool(title="List Course Content", annotations=_READ_ONLY)
     async def list_course_content(ctx: Context[ServerSession, AppContext], ref_id: str) -> str:
         """
         List all content of a course. Automatically expands:
@@ -1580,14 +1862,14 @@ def register(mcp: FastMCP) -> None:
 
         lines: list[str] = []
         for s in sections:
-            lines.append(f"\n## {s.item.item_type}: {s.item.title}  (ref_id={s.item.ref_id})")
+            lines.append(f"\n## {s.item.item_type}: {clean_text(s.item.title)}  (ref_id={s.item.ref_id})")
             if s.files:
                 for f in s.files:
-                    label = f.file_name or f.title
+                    label = clean_text(f.file_name or f.title)
                     lines.append(f"  - [{label}]({f.url})")
             elif s.videos:
                 for v in s.videos:
-                    lines.append(f"  - {v.title} ({v.date})")
+                    lines.append(f"  - {clean_text(v.title)} ({clean_text(v.date)})")
                     lines.append(f"    Stream:   {v.url}")
                     lines.append(f"    Download: {v.download_url}")
                     if v.subtitle_url:
@@ -1596,8 +1878,8 @@ def register(mcp: FastMCP) -> None:
                 lines.append(f"  URL: {s.item.url}")
         return "\n".join(lines)
 
-    @mcp.tool()
-    async def list_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[dict]:
+    @mcp.tool(title="List Course Files", annotations=_READ_ONLY)
+    async def list_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> list[CourseFileOut]:
         """
         Recursively list all downloadable files in a course.
 
@@ -1608,7 +1890,7 @@ def register(mcp: FastMCP) -> None:
         app.rate_limiter.check("list_course_files")
         logger.info("Tool 'list_course_files' called with ref_id=%s.", ref_id)
         files = await app.download_service.list_course_files(RefId(ref_id))
-        return [{"title": f.title, "file_name": f.file_name, "file_type": f.file_type, "url": f.url} for f in files]
+        return [CourseFileOut(title=clean_text(f.title), file_name=f.file_name, file_type=f.file_type, url=f.url) for f in files]
 ```
 
 ---
@@ -1625,12 +1907,21 @@ from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+from mcp.types import ToolAnnotations
 
 from application.download_service import DownloadTracker, _build_summary
 from domain.models import RefId
 from interface.context import AppContext, app_from_ctx
 
 logger = logging.getLogger(__name__)
+
+# Downloads write new files and occasionally overwrite a stale local copy
+# (on remote/local size mismatch) — not read-only, and destructiveHint=True
+# reflects that possible overwrite so clients can prompt before running it.
+_DOWNLOAD = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True
+)
+_STATUS = ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False)
 
 
 def _progress_log(ctx: Context[ServerSession, AppContext], collector: list[str]):
@@ -1646,41 +1937,67 @@ def _progress_log(ctx: Context[ServerSession, AppContext], collector: list[str])
 
 
 def register(mcp: FastMCP, download_dir: str) -> None:
-    @mcp.tool()
-    async def download_course_files(ctx: Context[ServerSession, AppContext], ref_id: str) -> str:
+    @mcp.tool(title="Download Course Files", annotations=_DOWNLOAD)
+    async def download_course_files(
+        ctx: Context[ServerSession, AppContext],
+        ref_id: str,
+        semester: str = "",
+    ) -> str:
         """
         Download all files from a single course to DOWNLOAD_DIR (.env).
-        Always call preview_course_files first and show the result to the user before calling this tool.
+        When a semester is specified, files are saved under DOWNLOAD_DIR/<semester>/<course>/.
+        Always call list_course_content first and show the result to the user before calling this tool.
 
         Args:
             ref_id: The ILIAS ref_id of the course (obtained from list_courses).
+            semester: Semester label, e.g. "HS2025" (from list_semesters).
+                      Used both for navigation and as the subfolder name. Leave empty for current semester.
         """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("download_course_files")
-        logger.info("Tool 'download_course_files' called with ref_id=%s.", ref_id)
+        logger.info("Tool 'download_course_files' called with ref_id=%s, semester=%s.", ref_id, semester or "current")
         app.download_tracker.reset()
+        base_dir = Path(download_dir) / semester if semester else Path(download_dir)
         log_lines: list[str] = []
         downloaded, skipped = await app.download_service.download_course(
-            RefId(ref_id), Path(download_dir), app.download_tracker, log=_progress_log(ctx, log_lines)
+            RefId(ref_id),
+            base_dir,
+            app.download_tracker,
+            log=_progress_log(ctx, log_lines),
+            semester_label=semester or None,
         )
-        summary = _build_summary(downloaded, skipped, 1, Path(download_dir), app.download_tracker)
+        summary = _build_summary(downloaded, skipped, 1, base_dir, app.download_tracker)
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
 
-    @mcp.tool()
-    async def download_all_files(ctx: Context[ServerSession, AppContext]) -> str:
-        """Download every file from every course to the directory configured in DOWNLOAD_DIR (.env)."""
+    @mcp.tool(title="Download All Files", annotations=_DOWNLOAD)
+    async def download_all_files(
+        ctx: Context[ServerSession, AppContext],
+        semester: str = "",
+    ) -> str:
+        """
+        Download every file from every course to the directory configured in DOWNLOAD_DIR (.env).
+        When a semester is specified, files are saved under DOWNLOAD_DIR/<semester>/<course>/.
+
+        Args:
+            semester: Semester label, e.g. "HS2025" (from list_semesters).
+                      Used both for navigation and as the subfolder name. Leave empty for current semester.
+        """
         app = app_from_ctx(ctx)
         app.rate_limiter.check("download_all_files")
-        logger.info("Tool 'download_all_files' called.")
+        logger.info("Tool 'download_all_files' called (semester=%s).", semester or "current")
+        base_dir = Path(download_dir) / semester if semester else Path(download_dir)
         log_lines: list[str] = []
         summary = await app.download_service.download_all(
-            Path(download_dir), app.download_tracker, log=_progress_log(ctx, log_lines)
+            base_dir,
+            app.download_tracker,
+            log=_progress_log(ctx, log_lines),
+            semester_label=semester or None,
         )
         progress_log = "\n".join(log_lines)
         return f"=== Progress Log ===\n{progress_log}\n\n{summary}"
 
-    @mcp.tool()
+    @mcp.tool(title="Download Status", annotations=_STATUS)
     async def download_status(ctx: Context[ServerSession, AppContext]) -> str:
         """
         Show the current download progress: pending, active, done, and skipped files with file sizes.
@@ -1811,13 +2128,15 @@ mcp = FastMCP(
         "lecture materials, Uni Bern, or ilias.unibe.ch.\n"
         "Workflow: always call `login` first, then use the other tools.\n"
         "- `login` — authenticate via Switch edu-ID\n"
-        "- `list_courses` — list enrolled courses\n"
+        "- `list_semesters` — list all available semesters (e.g. HS2025, FS2026) with their labels\n"
+        "- `list_courses` — list enrolled courses; pass semester=\"HS2025\" to get courses from a specific semester\n"
         "- `list_course_content` — list all course content: auto-expands folders (files+download URLs) and Opencast series (videos+download URLs)\n"
         "- `list_course_content_docs` — list top-level INHALT items of a course (folders auto-expanded, no video expansion)\n"
         "- `list_course_content_video` — list Opencast video recordings for a specific series ref_id\n"
         "- `list_course_files` — recursively list all downloadable files in a course\n"
-        "- `download_course_files` — download all files from a single course\n"
-        "- `download_all_files` — download all files from all courses"
+        "- `download_course_files` — download all files from a single course; pass semester=\"HS2025\" to target a specific semester (files saved to DOWNLOAD_DIR/<semester>/<course>/)\n"
+        "- `download_all_files` — download all files from all courses; pass semester=\"HS2025\" to target a specific semester\n"
+        "Semester workflow: call list_semesters → note the label (e.g. \"HS2025\") → call list_courses(semester=\"HS2025\") → verify response.semester matches → download with semester=\"HS2025\""
     ),
 )
 
@@ -1844,9 +2163,25 @@ if __name__ == "__main__":
 - `item_type.lower()` contains `"datei"` or `"file"` → top-level document → wrapped as a single `CourseFile`; extension derived from type prefix (e.g. "pdf Datei" → `.pdf`) or title suffix
 - Anything else → pass through as-is (no sub-expansion)
 
+### Semester handling
+- `IliasCourseAdapter._get_semester_url` resolves the stable `goto.php?target=iLUBModsSemester{labels}&default={label}` URL by reading the "Aktuelles Semester" nav link once and substituting the `default=` query param — this URL survives across ILIAS sessions and does not depend on click state.
+- `get_semesters()` parses all available labels from the `target=` parameter (underscore-joined, e.g. `HS2026_FS2026_HS2025_FS2025_HS2024`) and detects the active one via `button[aria-label='{label}'][aria-pressed='true']`.
+- `get_courses(semester_label)` navigates to the `default={label}` URL; if ILIAS does not honour that parameter (server-side session preference can override it), it falls back to clicking the matching semester tab directly before extracting courses.
+- Course/video titles from ILIAS often carry an institutional code prefix (e.g. `"450407-FS2026-0: Grundzüge Erdwissenschaften II"` or `"FS2026: Lektion 1"`). `_strip_course_prefix` / `_strip_video_title` (in `download_service.py`) and the inline stripping in `IliasFileAdapter.download_video` remove this prefix for local directory/file names, while `_course_dir` and `_video_expected_path` still fall back to the old unstripped name if a matching directory/file from before this change already exists — so previously downloaded courses/videos are not re-downloaded.
+- `download_course` / `download_all` / the `download_course_files` / `download_all_files` MCP tools all accept an optional `semester_label` / `semester` parameter; when set, the download tools additionally save into `DOWNLOAD_DIR/<semester>/<course>/` instead of `DOWNLOAD_DIR/<course>/`.
+
+### Tool annotations & structured output (interface/tools/, interface/schemas.py)
+- Every `@mcp.tool(...)` registration sets `title=` (human-readable display name) and `annotations=ToolAnnotations(...)` per the MCP tool spec, so clients can decide when to prompt the user before invoking a tool:
+  - All `list_*` tools: `readOnlyHint=True, idempotentHint=True, openWorldHint=True` (shared `_READ_ONLY` constant in `course_tools.py`).
+  - `login`: `readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True`.
+  - `download_course_files` / `download_all_files`: `readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True` — `destructiveHint=True` because a local/remote file-size mismatch triggers an overwrite of the existing file (see "Download skip logic" below).
+  - `download_status`: `readOnlyHint=True, idempotentHint=True, openWorldHint=False` — it only reads in-memory tracker state, no ILIAS network call.
+- Tools that return list/dict data (`list_semesters`, `list_courses`, `list_course_content_docs`, `list_course_content_video`, `list_course_files`) return Pydantic models from `interface/schemas.py` instead of bare `dict`/`list[dict]`. FastMCP derives a typed `outputSchema` (with real `$defs`/`properties`, not a generic object) from these return-type annotations, and populates `structuredContent` on every tool call automatically — no extra wiring needed beyond the return type.
+- Tools that return a formatted text report (`login`, `list_course_content`, `download_course_files`, `download_all_files`, `download_status`) intentionally keep `-> str`; FastMCP still auto-wraps these in a generic `{"result": "..."}` structured block, but the meaningful payload is the human-readable text content, not structured data.
+
 ### Download directory layout
 
-- Course root: `output_dir/<course_title>/`
+- Course root: `output_dir/<course_title>/` (or `DOWNLOAD_DIR/<semester>/<course_title>/` when a semester is specified — see "Semester handling" above)
 - Folder sections (Ordner) and Opencast sections: saved into `output_dir/<course_title>/<section_title>/`
 - Top-level documents and other items: saved directly into `output_dir/<course_title>/`
 
@@ -1854,7 +2189,7 @@ if __name__ == "__main__":
 
 - `list_videos` discriminates subtitle links from video download links by reading the `button.dropdown-toggle` text: `"Download"` → video links; `"Untertitel"` → subtitle URL
 - `VideoItem.subtitle_url` carries the subtitle download URL (empty string if none)
-- `download_video` calls `_download_subtitle` after saving the video; subtitle is saved with the same stem as the video file but with the extension from the suggested filename (default `.srt`); subtitle failures are logged as warnings, not raised
+- `download_video` calls `_download_subtitle` after saving the video; subtitle is saved with the same stem as the video file but with the extension from the suggested filename (default `.srt`); subtitle failures (`PlaywrightError`, `OSError`) are logged as warnings, not raised
 
 ### ILIAS DOM selectors (confirmed for ilias.unibe.ch ILIAS v9)
 | What | Selector |
@@ -1863,6 +2198,8 @@ if __name__ == "__main__":
 | Login submit | `input#wayf_submit_button` |
 | Email field | `input#username, input[name='j_username']` |
 | Password submit | `button#button-submit` (with fallbacks) |
+| Semester nav link | `a:has-text('Aktuelles Semester')` |
+| Semester tab button | `button[aria-label='{label}']`, active state via `[aria-pressed='true']` |
 | Course items | `.il-item-title button[data-action*='ref_id']` |
 | INHALT block | `.ilContainerBlock` with `h2/h3` text "inhalt" |
 | Content rows | `.ilObjListRow`, `.il-std-item`, `.il_ContainerListItem` |
@@ -1873,6 +2210,7 @@ if __name__ == "__main__":
 ### URL patterns
 - Course page: `{base_url}/ilias.php?ref_id={id}&cmd=view&baseClass=ilrepositorygui`
 - Opencast series: `{base_url}/ilias.php?baseClass=ilObjPluginDispatchGUI&cmd=forward&ref_id={id}&forwardCmd=showContent`
+- Semester listing: `{base_url}/goto.php?target=iLUBModsSemester{labels_joined_by_underscore}&default={label}`
 - Video download links ordered highest → lowest resolution inside each row
 
 ### File deduplication
@@ -1881,8 +2219,8 @@ URLs are normalised by stripping `cmdNode=[^&]*&?` before dedup. This removes th
 
 ### Download skip logic
 - Skip if local file exists AND (remote size unavailable OR remote size == local size).
-- Re-download if sizes differ (size mismatch = partial/updated file).
-- Video skip: checks for `{safe_title}_{date}.mp4` first, then globs for any extension.
+- Re-download if sizes differ (size mismatch = partial/updated file) — this is the case that makes `download_course_files`/`download_all_files` carry `destructiveHint=True` (see "Tool annotations & structured output" above).
+- Video skip: checks for `{stripped_title}_{date}.mp4` first (current, prefix-stripped naming), then falls back to `{original_title}_{date}.mp4` for files downloaded before prefix stripping was introduced, then globs for any extension.
 
 ### Rate limiter
 Per-tool sliding window: max 20 calls/min by default (`RATE_LIMIT_CALLS_PER_MIN` env var).
@@ -1929,4 +2267,5 @@ uv run --extra dev pytest tests/
 
 All package `__init__.py` files (`domain/`, `application/`, `infrastructure/`, `interface/`,
 `interface/tools/`, `tests/`) are empty files — create them as empty to make the directories
-Python packages.
+Python packages. `interface/schemas.py` is **not** an `__init__.py` — it is a regular module with
+the Pydantic response models documented above.
